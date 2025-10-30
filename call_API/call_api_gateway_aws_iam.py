@@ -4,6 +4,7 @@ import hmac
 import requests
 import os
 
+
 HOST = "api.dev-apvm.awsdev.boehringer.com"
 PATH = "/db/accounts_to_close"
 METHOD = "POST"  # Change to POST if required
