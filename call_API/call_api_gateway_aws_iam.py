@@ -1,77 +1,94 @@
-import datetime
-import hashlib
-import hmac
-import requests
+#!/usr/bin/env python3
+import boto3
 import os
+import json
+import requests
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 
-HOST = "api.dev-apvm.awsdev.boehringer.com"
-PATH = "/db/accounts_to_close"
-METHOD = "POST"  # Change to POST if required
-REGION = "eu-west-1"
 
-# AWS access keys
-access_key = os.environ['AWS_ACCESS_KEY_ID']  
-secret_key = os.environ['AWS_SECRET_ACCESS_KEY']
-session_token = os.environ['AWS_SESSION_TOKEN']
+def call_signed_api_local(
+    endpoint: str,
+    payload: dict,
+    region: str = "eu-west-1",
+    method: str = "POST",
+    api_host: str = "https://api.dev-apvm.awsdev.boehringer.com/",
+    cert_path: str = "/home/stava/Errors/utils/call_API/ca-bundle.trust.crt",  # 👈 replace with your path
+):
+    """
+    Call a SigV4-signed API using local AWS credentials (from env or AWS CLI config).
+    """
+    print("=== Starting local signed API test ===")
+    print(f"API host: {api_host}")
+    print(f"Endpoint: {endpoint}")
+    print(f"Certificate path: {cert_path}")
+    print(f"Region: {region}")
 
-# Request parameters
-method = METHOD
-service = 'execute-api'
-host = HOST
-region = REGION
-endpoint = PATH
+    # Create a session using your exported credentials
+    session = boto3.session.Session()
+    credentials = session.get_credentials().get_frozen_credentials()
 
-# Create a datetime object for signing
-t = datetime.datetime.utcnow()
-amzdate = t.strftime('%Y%m%dT%H%M%SZ')
-datestamp = t.strftime('%Y%m%d') 
+    print("Loaded credentials from environment or AWS CLI config")
 
-# Payload (if required)
-payload = '{"body":{"skip_data_gathering":false,"skip_suspending":false,"skip_closing":true,"DryRun":true}}'
-payload_hash = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+    headers = {"Content-Type": "application/json"}
 
-# Create the canonical request
-canonical_uri = endpoint
-canonical_querystring = ''  # Add query params if required
-canonical_headers = 'host:' + host + '\n'
-signed_headers = 'host'
-canonical_request = (method + '\n' + canonical_uri + '\n' + canonical_querystring + '\n'
-                     + canonical_headers + '\n' + signed_headers + '\n' + payload_hash)
+    url = f"{api_host.rstrip('/')}/{endpoint.lstrip('/')}"
+    print(f"Final URL: {url}")
 
-# Create the string to sign
-algorithm = 'AWS4-HMAC-SHA256'
-credential_scope = datestamp + '/' + region + '/' + service + '/' + 'aws4_request'
-string_to_sign = (algorithm + '\n' +  amzdate + '\n' +  credential_scope + '\n' +  
-                  hashlib.sha256(canonical_request.encode('utf-8')).hexdigest())
+    request = AWSRequest(
+        method=method,
+        url=url,
+        data=json.dumps(payload),
+        headers=headers,
+    )
 
-def sign(key, msg):
-    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+    # Sign the request using SigV4
+    SigV4Auth(credentials, "execute-api", region).add_auth(request)
 
-def getSignatureKey(key, dateStamp, regionName, serviceName):
-    kDate = sign(("AWS4" + key).encode("utf-8"), dateStamp)
-    kRegion = sign(kDate, regionName)
-    kService = sign(kRegion, serviceName)
-    kSigning = sign(kService, "aws4_request")
-    return kSigning
+    print("Signed headers:")
+    for k, v in request.headers.items():
+        print(f"  {k}: {v}")
 
-# Sign the string    
-signing_key = getSignatureKey(secret_key, datestamp, region, service)
-signature = hmac.new(signing_key, (string_to_sign).encode('utf-8'), hashlib.sha256).hexdigest()
+    # Make the request
+    try:
+        print("\n=== Sending HTTPS request ===")
+        response = requests.request(
+            method=method,
+            url=request.url,
+            headers=dict(request.headers),
+            data=request.body,
+            verify=cert_path,  # local CA or bundle
+            timeout=30,
+        )
 
-# Add signing information to the request
-authorization_header = (algorithm + ' ' + 'Credential=' + access_key + '/' + credential_scope + ', ' +  
-                        'SignedHeaders=' + signed_headers + ', ' + 'Signature=' + signature)
+        print(f"Status code: {response.status_code}")
+        print(f"Response headers:\n{json.dumps(dict(response.headers), indent=2)}")
 
-# Make the request
-headers = {
-    'Host': host,
-    'x-amz-date': amzdate,
-    'x-amz-security-token': session_token,
-    'Authorization': authorization_header,
-    'Content-Type': 'application/json'  # Add if required
-}
-request_url = 'https://' + host + canonical_uri
-response = requests.post(request_url, headers=headers, data=payload, timeout=5, verify=False)  # Change to POST if required
-response.raise_for_status()
+        if response.text:
+            print(f"Response body:\n{response.text}")
 
-print(response.text)
+        response.raise_for_status()
+        return response.json()
+
+    except requests.exceptions.SSLError as e:
+        print(f"\n❌ SSL Error:\n{e}")
+    except requests.exceptions.RequestException as e:
+        print(f"\n❌ Request Error:\n{e}")
+
+
+if __name__ == "__main__":
+    # Example usage
+    payload = {"DryRun": True}
+    endpoint = "/db/get_accounts_to_suspend"
+
+    # You can override these via environment variables
+    api_host = os.environ.get("API_HOST_NAME", "https://api.dev-apvm.awsdev.boehringer.com/")
+    cert_path = os.environ.get("LOCAL_CERT_PATH", "/path/to/local/cert/ca-bundle.trust.crt")
+
+    call_signed_api_local(
+        endpoint=endpoint,
+        payload=payload,
+        region="eu-west-1",
+        api_host=api_host,
+        cert_path=cert_path,
+    )
